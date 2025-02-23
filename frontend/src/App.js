@@ -5,7 +5,7 @@ import Navbar from './components/navbar/navbar';
 import Home from './components/home/home';
 import UserData from './components/user-data/user-data';
 import SendEmails from './components/send-emails/send-emails';
-import Footer from './components/Footer/footer'
+import Footer from './components/footer/footer'
 import Analysis from './components/analysis/analysis';
 
 function App() {
