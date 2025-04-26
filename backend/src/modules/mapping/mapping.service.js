@@ -1,145 +1,153 @@
-import fs from "fs";
 import csv from "csv-parser";
-import { MappingModel, CleanedDataset } from "./mapping.model.js";
-import fuzzyMatch from "../../utils/fuzzyMatch.js";
+import { createReadStream, writeFileSync, existsSync, mkdirSync } from "fs";
+import { parse, stringify } from "csv/sync";
+import { promisify } from "util";
+import { pipeline } from "stream";
+import { OriginalHeaders, HeaderMappings } from "./mapping.model.js";
+import leven from "leven";
+import path from "path";
 
-// Configuration for large file handling
-const STREAM_CONFIG = {
-	highWaterMark: 1024 * 1024 * 32, // 32MB buffer size
-	encoding: "utf-8",
+const pipelineAsync = promisify(pipeline);
+
+// Helper function for fuzzy matching
+const fuzzyMatchHeaders = (originalHeaders, newHeaders) => {
+	const threshold = 0.4; // Similarity threshold
+	const mappings = [];
+
+	for (const newHeader of newHeaders) {
+		let bestMatch = { originalHeader: null, similarity: 0 };
+
+		for (const originalHeader of originalHeaders) {
+			const distance = leven(
+				newHeader.toLowerCase(),
+				originalHeader.toLowerCase()
+			);
+			const maxLength = Math.max(newHeader.length, originalHeader.length);
+			const similarity = 1 - distance / maxLength;
+
+			if (similarity > bestMatch.similarity && similarity >= threshold) {
+				bestMatch = {
+					originalHeader,
+					similarity: parseFloat(similarity.toFixed(2)),
+				};
+			}
+		}
+
+		mappings.push({
+			newHeader,
+			originalHeader: bestMatch.originalHeader,
+			similarity: bestMatch.similarity,
+			mappedName: bestMatch.originalHeader || newHeader,
+		});
+	}
+
+	return mappings;
 };
 
-const MAX_ROWS_BEFORE_PAUSE = 1000; // Process in chunks of 1000 rows
-
-export const processAndMapCSVFiles = async (originalFile, userFile) => {
-	try {
-		// Validate and get file paths
-		const originalFilePath = validateAndGetPath(originalFile);
-		const userFilePath = validateAndGetPath(userFile);
-
-		// Process both files in parallel
-		const [originalHeaders, userHeaders] = await Promise.all([
-			extractHeadersFromCSV(originalFilePath),
-			extractHeadersFromCSV(userFilePath),
-		]);
-
-		// Create header mapping
-		const headerMap = createHeaderMap(userHeaders, originalHeaders);
-
-		// Calculate matching statistics
-		const matchStats = {
-			totalUserHeaders: userHeaders.length,
-			totalOriginalHeaders: originalHeaders.length,
-			matchedHeaders: Object.keys(headerMap).length,
-			unmatchedHeaders: userHeaders.length - Object.keys(headerMap).length,
-			matchPercentage: parseFloat(
-				((Object.keys(headerMap).length / userHeaders.length) * 100).toFixed(2)
-			),
-		};
-
-		// Process user file with proper streaming
-		const cleanedData = await processFileWithStreaming(userFilePath, headerMap);
-
-		// Save to database
-		const [cleanedDataset] = await Promise.all([
-			CleanedDataset.create({
-				originalHeaders,
-				cleanedData,
-				mappingStats: matchStats,
-			}),
-			MappingModel.create({
-				originalDatasetName: originalFile.name,
-				userUploadedDatasetName: userFile.name,
-				originalHeaders,
-				userHeaders,
-				headerMap,
-				matchStats,
-			}),
-		]);
-
-		return {
-			headerMap,
-			matchStats,
-			cleanedDataId: cleanedDataset._id,
-			sampleData: cleanedData.slice(0, 5), // Return first 5 rows as sample
-		};
-	} catch (error) {
-		console.error("CSV Processing Error:", error);
-		throw new Error(
-			error.message.includes("offset")
-				? "File too large. Please split into smaller files (max 100MB)"
-				: error.message
-		);
-	}
-};
-
-// Helper Functions
-
-function validateAndGetPath(file) {
-	const path = file.tempFilePath || file.path;
-	if (!path || !fs.existsSync(path)) {
-		throw new Error(`Invalid file path: ${file.name}`);
-	}
-	return path;
-}
-
-function extractHeadersFromCSV(filePath) {
+export const extractHeaders = async (filePath) => {
 	return new Promise((resolve, reject) => {
 		const headers = [];
-		fs.createReadStream(filePath, STREAM_CONFIG)
+		const stream = createReadStream(filePath)
 			.pipe(csv())
-			.on("headers", (h) => headers.push(...h))
-			.on("data", () => {}) // Just to trigger parsing
-			.on("end", () => resolve(headers))
-			.on("error", reject);
-	});
-}
-
-function createHeaderMap(userHeaders, originalHeaders) {
-	const headerMap = {};
-	const matches = fuzzyMatch(userHeaders, originalHeaders);
-
-	userHeaders.forEach((header, index) => {
-		if (matches[index]) {
-			headerMap[header] = matches[index];
-		}
-	});
-
-	return headerMap;
-}
-
-function processFileWithStreaming(filePath, headerMap) {
-	return new Promise((resolve, reject) => {
-		const cleanedData = [];
-		let rowCount = 0;
-
-		const stream = fs
-			.createReadStream(filePath, STREAM_CONFIG)
-			.pipe(csv())
-			.on("data", (row) => {
-				try {
-					// Transform row according to header mapping
-					const transformedRow = {};
-					for (const [userHeader, value] of Object.entries(row)) {
-						if (headerMap[userHeader]) {
-							transformedRow[headerMap[userHeader]] = value;
-						}
-					}
-					cleanedData.push(transformedRow);
-
-					// Prevent memory overload
-					if (++rowCount % MAX_ROWS_BEFORE_PAUSE === 0) {
-						stream.pause();
-						setImmediate(() => stream.resume());
-					}
-				} catch (rowError) {
-					stream.destroy();
-					reject(
-						new Error(`Error processing row ${rowCount}: ${rowError.message}`)
-					);
-				}
+			.on("headers", (extractedHeaders) => {
+				headers.push(...extractedHeaders);
+				stream.destroy();
+				resolve(headers);
 			})
-			.on("end", () => resolve(cleanedData))
 			.on("error", reject);
 	});
-}
+};
+
+export const saveOriginalHeaders = async (headers, fileInfo) => {
+	try {
+		await OriginalHeaders.deleteMany({});
+		const newHeaders = new OriginalHeaders({ headers, fileInfo });
+		await newHeaders.save();
+		return newHeaders;
+	} catch (error) {
+		throw new Error("Failed to save original headers: " + error.message);
+	}
+};
+
+export const processDataset = async (filePath) => {
+	try {
+		// Get original headers
+		const originalDoc = await OriginalHeaders.findOne().sort({ createdAt: -1 });
+		if (!originalDoc) throw new Error("No original headers found");
+		const originalHeaders = originalDoc.headers;
+
+		// Extract headers from new file
+		const newHeaders = await extractHeaders(filePath);
+		if (!newHeaders.length)
+			throw new Error("No headers found in uploaded file");
+
+		// Create mappings with fuzzy matching
+		const mappings = fuzzyMatchHeaders(originalHeaders, newHeaders);
+
+		// Read and process the CSV file
+		const fileContent = await new Promise((resolve, reject) => {
+			const chunks = [];
+			createReadStream(filePath)
+				.pipe(csv())
+				.on("data", (chunk) => chunks.push(chunk))
+				.on("end", () => resolve(chunks))
+				.on("error", reject);
+		});
+
+		// Transform data with new headers
+		const cleanedData = fileContent.map((row) => {
+			const newRow = {};
+			mappings.forEach((mapping) => {
+				newRow[mapping.mappedName] = row[mapping.newHeader];
+			});
+			return newRow;
+		});
+
+		// Generate cleaned CSV
+		const cleanedHeaders = mappings.map((m) => m.mappedName);
+		const cleanedCsv = stringify(cleanedData, {
+			header: true,
+			columns: cleanedHeaders,
+		});
+
+		// Ensure uploads directory exists
+		const uploadsDir = path.join(process.cwd(), "uploads");
+		if (!existsSync(uploadsDir)) {
+			mkdirSync(uploadsDir, { recursive: true });
+		}
+
+		// Save to cleaned file in uploads directory
+		const cleanedFilename = `${Date.now()}_cleaned.csv`;
+		const cleanedFilePath = path.join(uploadsDir, cleanedFilename);
+		writeFileSync(cleanedFilePath, cleanedCsv);
+
+		// Save mapping results
+		const mappingDoc = new HeaderMappings({
+			originalHeaders,
+			newHeaders,
+			mappings,
+		});
+		await mappingDoc.save();
+
+		return {
+			cleanedFilePath,
+			cleanedFilename,
+			mappings,
+			originalHeaders,
+			newHeaders,
+			cleanedHeaders,
+			recordCount: cleanedData.length,
+		};
+	} catch (error) {
+		throw new Error(`Dataset processing failed: ${error.message}`);
+	}
+};
+
+export const getOriginalHeaders = async () => {
+	try {
+		const doc = await OriginalHeaders.findOne().sort({ createdAt: -1 });
+		return doc ? doc.headers : null;
+	} catch (error) {
+		throw new Error("Failed to fetch headers: " + error.message);
+	}
+};

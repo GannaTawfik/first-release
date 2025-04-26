@@ -1,38 +1,61 @@
-// utils/multer.js
 import multer from "multer";
-import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
+import { existsSync, mkdirSync } from "fs";
 
-// Ensure 'uploads/' folder exists, create it if not
-const uploadDir = path.join(process.cwd(), "uploads");
-if (!fs.existsSync(uploadDir)) {
-	fs.mkdirSync(uploadDir);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const uploadDir = path.join(__dirname, "../../uploads");
+
+// Ensure upload directory exists
+if (!existsSync(uploadDir)) {
+	mkdirSync(uploadDir, { recursive: true });
 }
 
-// Configure storage
 const storage = multer.diskStorage({
 	destination: (req, file, cb) => {
-		cb(null, uploadDir); // Set the destination folder
+		cb(null, uploadDir);
 	},
 	filename: (req, file, cb) => {
-		cb(null, Date.now() + "-" + file.originalname); // Set the file name
+		const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+		cb(null, uniqueSuffix + path.extname(file.originalname));
 	},
 });
 
-// Correctly set the file size limit to 100 MB (100 * 1024 * 1024 bytes)
-const upload = multer({
-	storage: storage,
-	limits: { fileSize: 100 * 1024 * 1024 }, // Correct size limit for 100 MB
-	fileFilter: (req, file, cb) => {
-		// Accept only CSV files
-		if (file.mimetype !== "text/csv") {
-			return cb(new Error("Invalid file type. Only CSV files are allowed."));
-		}
+const fileFilter = (req, file, cb) => {
+	if (
+		file.mimetype === "text/csv" ||
+		file.mimetype === "application/vnd.ms-excel" ||
+		file.originalname.endsWith(".csv")
+	) {
 		cb(null, true);
+	} else {
+		cb(new Error("Only CSV files are allowed"), false);
+	}
+};
+
+export const upload = multer({
+	storage,
+	fileFilter,
+	limits: {
+		fileSize: 100 * 1024 * 1024, // 100MB limit
 	},
 });
 
-// Log the file size limit
-console.log("Multer file size limit:", 100 * 1024 * 1024); // Should print 100 MB
-
-export { upload };
+export const handleMulterErrors = (err, req, res, next) => {
+	if (err instanceof multer.MulterError) {
+		return res.status(400).json({
+			success: false,
+			message:
+				err.code === "LIMIT_FILE_SIZE"
+					? "File too large (max 100MB)"
+					: "File upload error",
+		});
+	} else if (err) {
+		return res.status(400).json({
+			success: false,
+			message: err.message || "File upload failed",
+		});
+	}
+	next();
+};

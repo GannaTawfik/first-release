@@ -1,19 +1,30 @@
 import express from "express";
+import { upload, handleMulterErrors } from "../../utils/multer.js";
 import {
-	uploadAndMapFiles,
-	getMappingHistory,
-	getCleanedDataset,
+	uploadOriginalDataset,
+	processDataset,
+	downloadCleanedDataset,
 } from "./mapping.controller.js";
 
 const router = express.Router();
 
-// File upload and mapping endpoint
-router.post("/upload", uploadAndMapFiles);
+// Original headers setup
+router.post(
+	"/uploadOriginalDataset",
+	upload.single("file"),
+	handleMulterErrors,
+	uploadOriginalDataset
+);
 
-// Get mapping history endpoint
-router.get("/history", getMappingHistory);
+// Dataset processing
+router.post(
+	"/processDataset",
+	upload.single("file"),
+	handleMulterErrors,
+	processDataset
+);
 
-// Get cleaned dataset endpoint
-router.get("/cleaned-data/:id", getCleanedDataset);
+// File download
+router.get("/download/:filename", downloadCleanedDataset);
 
 export default router;

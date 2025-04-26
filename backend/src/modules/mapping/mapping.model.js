@@ -1,32 +1,47 @@
 import mongoose from "mongoose";
 
-// Original mapping schema
-const MappingSchema = new mongoose.Schema({
-	originalDatasetName: { type: String, required: true },
-	userUploadedDatasetName: { type: String, required: true },
-	originalHeaders: [{ type: String }],
-	userHeaders: [{ type: String }],
-	headerMap: { type: Map, of: String },
-	matchStats: {
-		totalUserHeaders: Number,
-		totalOriginalHeaders: Number,
-		matchedHeaders: Number,
-		unmatchedHeaders: Number,
-		matchPercentage: Number,
+const originalHeadersSchema = new mongoose.Schema({
+	headers: {
+		type: [String],
+		required: true,
 	},
-	createdAt: { type: Date, default: Date.now },
+	createdAt: {
+		type: Date,
+		default: Date.now,
+	},
+	fileInfo: {
+		originalName: String,
+		size: Number,
+		encoding: String,
+		mimetype: String,
+	},
 });
 
-// New cleaned dataset schema
-const CleanedDatasetSchema = new mongoose.Schema({
-	mappingId: { type: mongoose.Schema.Types.ObjectId, ref: "Mapping" },
+const headerMappingsSchema = new mongoose.Schema({
 	originalHeaders: [String],
-	cleanedData: [mongoose.Schema.Types.Mixed],
-	createdAt: { type: Date, default: Date.now },
+	newHeaders: [String],
+	mappings: [
+		{
+			newHeader: String,
+			originalHeader: String,
+			similarity: Number,
+			mappedName: String,
+		},
+	],
+	createdAt: {
+		type: Date,
+		default: Date.now,
+	},
 });
 
-export const MappingModel = mongoose.model("Mapping", MappingSchema);
-export const CleanedDataset = mongoose.model(
-	"CleanedDataset",
-	CleanedDatasetSchema
+export const OriginalHeaders = mongoose.model(
+	"OriginalHeaders",
+	originalHeadersSchema,
+	"originalHeaders"
+);
+
+export const HeaderMappings = mongoose.model(
+	"HeaderMappings",
+	headerMappingsSchema,
+	"headerMappings"
 );
