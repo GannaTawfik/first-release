@@ -1,18 +1,25 @@
 {
-  "name": "backend",
-  "version": "1.0.0",
-  "scripts": {
-    "start": "node server.js"
-  },
-  "dependencies": {
-    "axios": "^1.7.9",
-    "backend": "file:",
-    "body-parser": "^1.20.3",
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.7",
-    "express": "^4.21.2",
-    "form-data": "^4.0.2",
-    "fs": "^0.0.1-security",
-    "multer": "^1.4.5-lts.1"
-  }
+    "type": "module",
+    "name": "backend",
+    "version": "1.0.0",
+    "scripts": {
+        "start": "nodemon server.js"
+    },
+    "dependencies": {
+        "axios": "^1.7.9",
+        "backend": "file:",
+        "body-parser": "^1.20.3",
+        "cors": "^2.8.5",
+        "csv-parser": "^3.2.0",
+        "dotenv": "^16.4.7",
+        "express": "^4.21.2",
+        "express-fileupload": "^1.5.1",
+        "express-validator": "^7.2.1",
+        "form-data": "^4.0.2",
+        "fs": "^0.0.1-security",
+        "fuse.js": "^7.1.0",
+        "mongoose": "^8.14.0",
+        "multer": "^1.4.5-lts.1",
+        "path": "^0.12.7"
+    }
 }

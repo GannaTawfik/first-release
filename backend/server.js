@@ -1,227 +1,212 @@
-const express = require('express');
-const multer = require('multer');
-const axios = require('axios');
-const path = require('path');
-const fs = require('fs');
-const cors = require('cors');
-const FormData = require('form-data');
+import express from "express";
+import cors from "cors";
+import bodyParser from "body-parser";
+import dotenv from "dotenv";
+import mongoose from "mongoose";
+import path from "path";
+import { existsSync, mkdirSync } from "fs";
+import { fileURLToPath } from "url"; // Added this import
+import fileUpload from "express-fileupload";
+import connectDB from "./src/config/connection.js";
+
+// Route imports
+import fileUploadRoutes from "./src/modules/fileUpload/fileUpload.routes.js";
+import rfmAnalysisRoutes from "./src/modules/rfmAnalysis/rfmAnalysis.routes.js";
+import modelTrainingRoutes from "./src/modules/modelTraining/modelTraining.routes.js";
+import revenueAnalyticsRoutes from "./src/modules/revenueAnalytics/revenueAnalytics.routes.js";
+import customerAnalyticsRoutes from "./src/modules/customerAnalytics/customerAnalytics.routes.js";
+import productAnalyticsRoutes from "./src/modules/productAnalytics/productAnalytics.routes.js";
+import geographicalAnalyticsRoutes from "./src/modules/geographicalAnalytics/geographicalAnalytics.routes.js";
+import mappingRoutes from "./src/modules/mapping/mapping.routes.js";
+
+// Get directory name in ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+dotenv.config();
 
 const app = express();
-const upload = multer({ dest: 'uploads/' });
+const PORT = process.env.PORT || 5001;
 
-// Enable CORS
-app.use(cors());
+// Connection state tracking
+let dbReady = false;
 
-// Helper function to send file to Flask backend
-const sendFileToFlask = async (filePath, originalname, mimetype, endpoint) => {
-    const formData = new FormData();
-    formData.append('file', fs.createReadStream(filePath), {
-        filename: originalname,
-        contentType: mimetype,
-    });
+// Initialize database connection
+const initializeServer = async () => {
+	try {
+		await connectDB();
+		dbReady = true;
+		console.log("✅ Database connection established");
 
-    const response = await axios.post(`http://localhost:5000/${endpoint}`, formData, {
-        headers: {
-            ...formData.getHeaders(),
-        },
-    });
+		// Ensure temp directory exists
+		const tempDir = path.join(__dirname, "tmp");
+		if (!existsSync(tempDir)) {
+			mkdirSync(tempDir);
+		}
 
-    return response.data;
+		// Enhanced file upload configuration
+		app.use(
+			fileUpload({
+				useTempFiles: true,
+				tempFileDir: tempDir,
+				createParentPath: true,
+				limits: {
+					fileSize: 500 * 1024 * 1024, // 500MB
+					files: 2, // Exactly 2 files required
+				},
+				abortOnLimit: true,
+				responseOnLimit: "Please upload exactly 2 CSV files",
+				safeFileNames: true,
+				preserveExtension: 4, // Keep .csv extension
+			})
+		);
+		// Add this RIGHT AFTER fileUpload middleware
+		app.use((req, res, next) => {
+			req.on("data", () => {});
+			req.on("end", next);
+		});
+
+		// Middleware
+		app.use(cors());
+		app.use(express.json({ limit: "500mb" }));
+		app.use(express.urlencoded({ limit: "500mb", extended: true }));
+
+		// Database connection check middleware
+		app.use((req, res, next) => {
+			if (!dbReady) {
+				return res.status(503).json({
+					success: false,
+					message: "Database connection not ready",
+					solution: "Please wait a moment and try again",
+				});
+			}
+			next();
+		});
+
+		// Error handling middleware
+		app.use((err, req, res, next) => {
+			console.error(err.stack);
+
+			// Handle file upload limit errors specifically
+			if (err.code === "LIMIT_FILE_SIZE") {
+				return res.status(413).json({
+					success: false,
+					message: "File too large (max 500MB)",
+				});
+			}
+
+			if (err.code === "LIMIT_FILE_COUNT") {
+				return res.status(400).json({
+					success: false,
+					message: "Maximum of 2 files allowed",
+				});
+			}
+
+			res.status(500).json({
+				success: false,
+				message: "Internal server error",
+				...(process.env.NODE_ENV === "development" && { error: err.message }),
+			});
+		});
+		// Add this BEFORE your routes in server.js
+		app.use((req, res, next) => {
+			req.on("data", () => {}); // Keep connection alive
+			next();
+		});
+
+		// Routes
+		app.use("/api", fileUploadRoutes);
+		app.use("/api", rfmAnalysisRoutes);
+		app.use("/api/modelTraining", modelTrainingRoutes);
+		app.use("/api/revenue_analytics", revenueAnalyticsRoutes);
+		app.use("/api/customer_analytics", customerAnalyticsRoutes);
+		app.use("/api/product_analytics", productAnalyticsRoutes);
+		app.use("/api", geographicalAnalyticsRoutes);
+		app.use("/api/mapping", mappingRoutes);
+
+		// Enhanced health check endpoint
+		app.get("/api/health", (req, res) => {
+			const memoryUsage = process.memoryUsage();
+			res.json({
+				status: "OK",
+				database: dbReady ? "Connected" : "Disconnected",
+				uptime: process.uptime(),
+				memory: {
+					rss: `${(memoryUsage.rss / 1024 / 1024).toFixed(2)} MB`,
+					heapTotal: `${(memoryUsage.heapTotal / 1024 / 1024).toFixed(2)} MB`,
+					heapUsed: `${(memoryUsage.heapUsed / 1024 / 1024).toFixed(2)} MB`,
+				},
+				timestamp: new Date(),
+			});
+		});
+
+		// Start server
+		app.listen(PORT, () => {
+			console.log(`🚀 Server running on port ${PORT}`);
+			console.log(`🔗 http://localhost:${PORT}`);
+			console.log(`📁 Temporary upload directory: ${tempDir}`);
+		});
+	} catch (error) {
+		console.error("❌ Failed to initialize server:", error.message);
+		process.exit(1);
+	}
 };
 
-
-// Upload and clean CSV
-app.post('/upload_csv', upload.single('file'), async (req, res) => {
-    if (!req.file) {
-        return res.status(400).json({ error: 'No file uploaded' });
-    }
-
-    try {
-        const result = await sendFileToFlask(req.file.path, req.file.originalname, req.file.mimetype, 'upload_csv');
-        res.json({ message: "File uploaded and cleaned successfully", data: result });
-    } catch (error) {
-        console.error("Backend error:", error);
-        res.status(500).json({ error: 'Error processing file' });
-    } finally {
-        fs.unlinkSync(req.file.path); // Clean up uploaded file
-    }
+// Enhanced database connection handling
+mongoose.connection.on("disconnected", () => {
+	dbReady = false;
+	console.log("⚠️  MongoDB disconnected");
+	// Auto-reconnect with exponential backoff
+	let retryDelay = 5000;
+	const reconnect = () => {
+		connectDB()
+			.then(() => {
+				dbReady = true;
+				console.log("♻️ MongoDB reconnected");
+			})
+			.catch((err) => {
+				console.error(
+					`Reconnection failed (retrying in ${retryDelay / 1000}s):`,
+					err.message
+				);
+				setTimeout(reconnect, retryDelay);
+				retryDelay = Math.min(retryDelay * 2, 30000); // Cap at 30s
+			});
+	};
+	setTimeout(reconnect, retryDelay);
 });
 
-// Perform RFM analysis
-app.post('/rfm_analysis', upload.single('file'), async (req, res) => {
-    if (!req.file) {
-        return res.status(400).json({ error: 'No file uploaded' });
-    }
+// Graceful shutdown with cleanup
+const shutdown = async () => {
+	try {
+		console.log("\n🛑 Shutting down server...");
 
-    try {
-        const result = await sendFileToFlask(req.file.path, req.file.originalname, req.file.mimetype, 'rfm_analysis');
-        res.json({ segment_data: result.segment_data });
-    } catch (error) {
-        console.error("Backend error:", error);
-        res.status(500).json({ error: 'Error performing RFM analysis' });
-    } finally {
-        fs.unlinkSync(req.file.path); // Clean up uploaded file
-    }
-});
+		const { rmSync } = await import("fs");
+		const tempDir = path.join(__dirname, "tmp");
+		try {
+			rmSync(tempDir, { recursive: true, force: true });
+			console.log("🧹 Cleaned up temporary files");
+		} catch (cleanupError) {
+			console.log("⚠️ Temp directory cleanup skipped:", cleanupError.message);
+		}
 
-// Train model
-app.post('/train_model', upload.single('file'), async (req, res) => {
-    if (!req.file) {
-        return res.status(400).json({ error: 'No file uploaded' });
-    }
+		await mongoose.connection.close();
+		console.log("⏏️ MongoDB connection closed");
+		process.exit(0);
+	} catch (err) {
+		console.error("Shutdown error:", err);
+		process.exit(1);
+	}
+};
 
-    try {
-        const result = await sendFileToFlask(req.file.path, req.file.originalname, req.file.mimetype, 'train_model');
-        res.json({
-            confusion_matrix: result.confusion_matrix,
-            classification_report: result.classification_report,
-        });
-    } catch (error) {
-        console.error("Backend error:", error);
-        res.status(500).json({ error: 'Error training model' });
-    } finally {
-        fs.unlinkSync(req.file.path); // Clean up uploaded file
-    }
-});
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
 
-// Get monthly revenue
-app.post('/monthly_revenue', upload.single('file'), async (req, res) => {
-    if (!req.file) {
-        return res.status(400).json({ error: 'No file uploaded' });
-    }
+// Start the server
+initializeServer();
 
-    try {
-        const result = await sendFileToFlask(req.file.path, req.file.originalname, req.file.mimetype, 'monthly_revenue');
-        res.json({ monthly_revenue: result.monthly_revenue });
-    } catch (error) {
-        console.error("Backend error:", error);
-        res.status(500).json({ error: 'Error fetching monthly revenue' });
-    } finally {
-        fs.unlinkSync(req.file.path); // Clean up uploaded file
-    }
-});
-
-// Get daily revenue
-app.post('/daily_revenue', upload.single('file'), async (req, res) => {
-    if (!req.file) {
-        return res.status(400).json({ error: 'No file uploaded' });
-    }
-
-    try {
-        const result = await sendFileToFlask(req.file.path, req.file.originalname, req.file.mimetype, 'daily_revenue');
-        res.json({ daily_revenue: result.daily_revenue });
-    } catch (error) {
-        console.error("Backend error:", error);
-        res.status(500).json({ error: 'Error fetching daily revenue' });
-    } finally {
-        fs.unlinkSync(req.file.path); // Clean up uploaded file
-    }
-});
-
-// Get top customers
-app.post('/top_customers', upload.single('file'), async (req, res) => {
-    if (!req.file) {
-        return res.status(400).json({ error: 'No file uploaded' });
-    }
-
-    try {
-        const result = await sendFileToFlask(req.file.path, req.file.originalname, req.file.mimetype, 'top_customers');
-        res.json({ top_customers: result.top_customers });
-    } catch (error) {
-        console.error("Backend error:", error);
-        res.status(500).json({ error: 'Error fetching top customers' });
-    } finally {
-        fs.unlinkSync(req.file.path); // Clean up uploaded file
-    }
-});
-
-// Get top products
-app.post('/top_products', upload.single('file'), async (req, res) => {
-    if (!req.file) {
-        return res.status(400).json({ error: 'No file uploaded' });
-    }
-
-    try {
-        const result = await sendFileToFlask(req.file.path, req.file.originalname, req.file.mimetype, 'top_products');
-        res.json({ top_products: result.top_products });
-    } catch (error) {
-        console.error("Backend error:", error);
-        res.status(500).json({ error: 'Error fetching top products' });
-    } finally {
-        fs.unlinkSync(req.file.path); // Clean up uploaded file
-    }
-});
-
-// Get monthly customer acquisition
-app.post('/monthly_customer_acquisition', upload.single('file'), async (req, res) => {
-    if (!req.file) {
-        return res.status(400).json({ error: 'No file uploaded' });
-    }
-
-    try {
-        const result = await sendFileToFlask(req.file.path, req.file.originalname, req.file.mimetype, 'monthly_customer_acquisition');
-        res.json({ monthly_acquisition: result.monthly_acquisition });
-    } catch (error) {
-        console.error("Backend error:", error);
-        res.status(500).json({ error: 'Error fetching monthly customer acquisition' });
-    } finally {
-        fs.unlinkSync(req.file.path); // Clean up uploaded file
-    }
-});
-
-// Get geographical analysis
-app.post('/geographical_analysis', upload.single('file'), async (req, res) => {
-    if (!req.file) {
-        return res.status(400).json({ error: 'No file uploaded' });
-    }
-
-    try {
-        const result = await sendFileToFlask(req.file.path, req.file.originalname, req.file.mimetype, 'geographical_analysis');
-        res.json({ geographical_revenue: result.geographical_revenue });
-    } catch (error) {
-        console.error("Backend error:", error);
-        res.status(500).json({ error: 'Error fetching geographical analysis' });
-    } finally {
-        fs.unlinkSync(req.file.path); // Clean up uploaded file
-    }
-});
-
-
-// Get product return rate
-app.post('/product_return_rate', upload.single('file'), async (req, res) => {
-    if (!req.file) {
-        return res.status(400).json({ error: 'No file uploaded' });
-    }
-
-    try {
-        const result = await sendFileToFlask(req.file.path, req.file.originalname, req.file.mimetype, 'product_return_rate');
-        res.json({ product_return_rate: result.product_return_rate });
-    } catch (error) {
-        console.error("Backend error:", error);
-        res.status(500).json({ error: 'Error fetching product return rate' });
-    } finally {
-        fs.unlinkSync(req.file.path); // Clean up uploaded file
-    }
-});
-
-// Get customer activity heatmap
-app.post('/customer_activity_heatmap', upload.single('file'), async (req, res) => {
-    if (!req.file) {
-        return res.status(400).json({ error: 'No file uploaded' });
-    }
-
-    try {
-        const result = await sendFileToFlask(req.file.path, req.file.originalname, req.file.mimetype, 'customer_activity_heatmap');
-        res.json({ activity_heatmap: result.activity_heatmap });
-    } catch (error) {
-        console.error("Backend error:", error);
-        res.status(500).json({ error: 'Error fetching customer activity heatmap' });
-    } finally {
-        fs.unlinkSync(req.file.path); // Clean up uploaded file
-    }
-});
-
-// Start server
-app.listen(5001, () => {
-    console.log('Backend server running on port 5001');
+// Handle uncaught exceptions
+process.on("uncaughtException", (err) => {
+	console.error("Uncaught Exception:", err);
+	shutdown();
 });
